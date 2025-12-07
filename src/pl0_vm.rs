@@ -281,7 +281,10 @@ impl PL0VM {
                     stack.resize(fp + varlen, 0);
                 }
                 OpCode::ReturnProc => {
-                    if cur_proc_i == 0 { break; } else {
+                    if cur_proc_i == 0 {
+                        if self.debug { println!("exiting"); }
+                        break;
+                    } else {
                         stack.truncate(procedures[cur_proc_i].frame_ptr);
                         let new_proc_i = u64::from_le_bytes(stack.drain(stack.len() - 8..).collect::<Vec<u8>>().try_into().expect("jumping back failed - stack invalid"));
                         let new_fp = u64::from_le_bytes(stack.drain(stack.len() - 8..).collect::<Vec<u8>>().try_into().expect("jumping back failed - stack invalid"));
@@ -492,7 +495,7 @@ impl PL0VM {
                     let str = match String::from_utf8(bytes) {
                         Ok(str) => str,
                         Err(err) => {
-                            error(&format!("invalid string contents: {}", err));
+                            error(&format!("\ninvalid string contents: {}", err));
                             break;
                         }
                     };
@@ -514,6 +517,7 @@ impl PL0VM {
                 }
 
                 OpCode::EndOfCode => {
+                    if self.debug { println!(); }
                     break;
                 }
 
