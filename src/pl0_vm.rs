@@ -260,6 +260,20 @@ impl PL0VM {
         };
         let offsetted = |start: &usize, offset: isize| start.checked_add_signed(offset).expect("invalid variable offset");
 
+        let arch_bytes = self.read_arg(0);
+        if self.debug {
+            println!("\t@0000: {:<21}{arch_bytes:04X} = {}", "Set Architecture", match arch_bytes {
+                2 => "16 bit",
+                4 => "32 bit",
+                8 => "64 bit",
+                _ => "invalid",
+            });
+        }
+        if arch_bytes != 2 && arch_bytes != 4 && arch_bytes != 8 {
+            error(&format!("invalid architecture bytes: {arch_bytes:04X} (allowed: 2, 4, 8)"));
+            return;
+        }
+
         loop {
             let byte = self.program[pc];
 
@@ -270,7 +284,7 @@ impl PL0VM {
                     break;
                 },
             };
-            if self.debug { print!("\t{pc:04X} => {:<21}", op); }
+            if self.debug { print!("\t@{pc:04X}: {:<21}", op); }
             pc += 1;
             match op {
                 OpCode::EntryProc => {
@@ -279,6 +293,7 @@ impl PL0VM {
                     let varlen = pop_argument(&mut pc) as usize;
                     fp = procedures[proc_i as usize].frame_ptr;
                     stack.resize(fp + varlen, 0);
+                    if self.debug { print!("reserved {varlen} bytes for variables"); }
                 }
                 OpCode::ReturnProc => {
                     if cur_proc_i == 0 {
@@ -329,21 +344,21 @@ impl PL0VM {
                 OpCode::PushAddressLocalVar => {
                     let addr = pop_argument(&mut pc);
                     let data = self.bytes_to_data(&offsetted(&fp, addr as isize).to_le_bytes());
-                    if self.debug { print!("put address {}", offsetted(&fp, addr as isize)); }
+                    if self.debug { print!("pushed address {}", offsetted(&fp, addr as isize)); }
                     push_data(&mut stack, data);
                 }
                 OpCode::PushAddressMainVar => {
                     let addr = pop_argument(&mut pc);
                     let data = self.bytes_to_data(&offsetted(&procedures[0].frame_ptr, addr as isize).to_le_bytes());
-                    if self.debug { print!("put address {}", offsetted(&procedures[0].frame_ptr, addr as isize)); }
+                    if self.debug { print!("pushed address {}", offsetted(&procedures[0].frame_ptr, addr as isize)); }
                     push_data(&mut stack, data);
                 }
                 OpCode::PushAddressGlobalVar => {
                     let addr = pop_argument(&mut pc);
                     let proc_index = pop_argument(&mut pc) as usize;
                     if self.debug {
-                        print!("from procedure {} put address {addr}", proc_index);
-                        print!(" => put address {}", offsetted(&procedures[proc_index].frame_ptr, addr as isize));
+                        print!("from procedure {} take address {addr}", proc_index);
+                        print!(" => pushed address {}", offsetted(&procedures[proc_index].frame_ptr, addr as isize));
                     }
                     let data = self.bytes_to_data(&offsetted(&procedures[proc_index].frame_ptr, addr as isize).to_le_bytes());
                     push_data(&mut stack, data);
@@ -351,13 +366,13 @@ impl PL0VM {
                 OpCode::PushConstant => {
                     let c = pop_argument(&mut pc);
                     let cd = constants[c as usize].clone();
-                    if self.debug { print!("at {c} => {}", cd.i64()); }
+                    if self.debug { print!("constant {c} => pushing {}", cd.i64()); }
                     push_data(&mut stack, cd);
                 }
                 OpCode::StoreValue => {
                     let data = pop_data(&mut stack);
                     let addr = pop_data(&mut stack).i64();
-                    if self.debug { print!("{:?} at {}", data, addr) }
+                    if self.debug { print!("value {} at address {}", data.i64(), addr) }
                     set_addr(&mut stack, &(addr as usize), &data);
                 }
 
@@ -371,7 +386,7 @@ impl PL0VM {
                 }
                 OpCode::InputToAddr => {
                     let addr = pop_data(&mut stack);
-                    if self.debug { println!("to {}? ", addr.i64()); }
+                    if self.debug { println!("to address {}", addr.i64()); }
                     'input_loop: loop {
                         let mut line = String::new();
                         stdin().lock().read_line(&mut line).expect("Input failed");
@@ -397,7 +412,9 @@ impl PL0VM {
                     push_data(&mut stack, data);
                 }
                 OpCode::IsOdd => {
-                    let val = pop_data(&mut stack).i64() % 2 == 1;
+                    let int = pop_data(&mut stack).i64();
+                    let val = int % 2 == 1;
+                    if self.debug { print!("{} => {}", int, val); }
                     push_data(&mut stack, self.data_bool(val));
                 }
 
@@ -439,11 +456,17 @@ impl PL0VM {
                 }
 
                 OpCode::CompareEq => {
-                    let val = pop_data(&mut stack).i64() == pop_data(&mut stack).i64();
+                    let right = pop_data(&mut stack).i64();
+                    let left = pop_data(&mut stack).i64();
+                    let val = left == right;
+                    if self.debug { print!("{left} == {right} = {val}") }
                     push_data(&mut stack, self.data_bool(val));
                 }
                 OpCode::CompareNotEq => {
-                    let val = pop_data(&mut stack).i64() != pop_data(&mut stack).i64();
+                    let right = pop_data(&mut stack).i64();
+                    let left = pop_data(&mut stack).i64();
+                    let val = left != right;
+                    if self.debug { print!("{left} != {right} = {val}") }
                     push_data(&mut stack, self.data_bool(val));
                 }
                 OpCode::CompareLT => {
@@ -478,6 +501,7 @@ impl PL0VM {
                 OpCode::Jump => {
                     let offset = pop_argument(&mut pc);
                     pc = offsetted(&pc, offset as isize);
+                    if self.debug { print!("jumping to {pc}"); }
                 }
                 OpCode::JumpIfFalse => {
                     let dat = pop_data(&mut stack).i64();
@@ -500,19 +524,23 @@ impl PL0VM {
                         }
                     };
                     if self.debug {
-                        print!("\n{str}");
+                        print!("\"{str}\"\n{str}");
                     } else {
                         println!("{str}");
                     }
                 }
 
                 OpCode::Pop => {
-                    pop_data(&mut stack);
+                    if self.debug {
+                        println!("popped {}", pop_data(&mut stack).i64());
+                    } else {
+                        pop_data(&mut stack);
+                    }
                 }
                 OpCode::Swap => {
                     let offset = pop_data(&mut stack).i64();
                     let data = self.bytes_to_data(&stack[(offset as usize)..]);
-                    if self.debug { print!("addr. {} => data {}", offset as usize, data.i64()) }
+                    if self.debug { print!("address {} => data {}", offset as usize, data.i64()) }
                     push_data(&mut stack, data);
                 }
 
@@ -526,7 +554,10 @@ impl PL0VM {
                 OpCode::OpAddAddr => { todo!() }
             }
 
-            if self.debug { println!(); }
+            match op {
+                OpCode::InputToAddr => (),
+                _ => if self.debug { println!(); }
+            };
         }
     }
 }
