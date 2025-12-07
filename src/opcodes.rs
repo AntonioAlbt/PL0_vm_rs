@@ -13,7 +13,7 @@ pub enum OpCode {
     PushConstant = 0x6, // (i16 index)
     StoreValue = 0x7, // erwartet auf Stack: Wert, dann Zieladresse
     OutputValue = 0x8, // println
-    InputValue = 0x9, // readln
+    InputToAddr = 0x9, // readln
 
     // Operatoren mit 1 Faktor
     Minusify = 0xA,
