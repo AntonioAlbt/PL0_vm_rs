@@ -1,4 +1,5 @@
 use std::env;
+use std::process::exit;
 use crate::pl0_vm::PL0VM;
 
 mod pl0_vm;
@@ -15,13 +16,21 @@ fn main() {
             analyze_only = true;
         } else if arg == "--debug" || arg == "-d" {
             debug = true;
+        } else if arg == "--help" || arg == "-h" {
+            println!("\
+Usage: {} [flags] <filename>
+Flags:
+  -a, --analyze\tOutput bytecode analysis information. (doesn't run the program)
+  -d, --debug\tOutput debug information while running the program. (outputs operations being run, with additional information)
+  -h, --help\tDisplay this message and exit.", args[0]);
+            exit(0);
         } else {
             filename = Some(arg);
         }
     });
 
     if filename.is_none() {
-        println!("Usage: {} [-a|--analyze] [-d|--debug] <filename>", args[0]);
+        println!("View usage information with: {} --help", args[0]);
         return;
     }
 
