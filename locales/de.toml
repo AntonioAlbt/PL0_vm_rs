@@ -1,5 +1,9 @@
 help = """
 Verwendung: pl0_vm_rs [Optionen] <Dateiname>
+
+Programm zum Ausführen von kompiliertem PL0-Bytecode.
+Ohne Angabe von Optionen wird der Bytecode direkt ausgeführt.
+
 Optionen:
   -a, --analyze\tBytecode analysieren und Informationen darüber ausgeben. (führt das Programm nicht aus)
   -d, --debug\tDebug-Informationen während der Programmausführung ausgeben. (gibt aus, welche Befehle gerade ausgeführt werden, mit erweiterten Informationen)
@@ -12,6 +16,8 @@ no_filename = "Dateiname fehlt. Infos zur Verwendung mit: pl0_vm_rs --help"
 file_error = "Fehler beim Öffnen der Datei: %{file}"
 
 [pl0]
+invalid_file = "Ungültige CL0-Datei. Enthält die Datei kompilierten PL0-Bytecode?"
+
 procedure_count = "Prozeduren"
 arch = "Architektur"
 invalid = "ungültig"

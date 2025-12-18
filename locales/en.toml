@@ -1,5 +1,9 @@
 help = """
 Usage: pl0_vm_rs [flags] <filename>
+
+Program for executing compiled PL0 bytecode.
+When run without specifying options, the bytecode will be executed directly.
+
 Flags:
   -a, --analyze\tOutput bytecode analysis information. (doesn't run the program)
   -d, --debug\tOutput debug information while running the program. (outputs operations being run, with additional information)
@@ -12,6 +16,8 @@ no_filename = "Filename is missing. View usage information with: pl0_vm_rs --hel
 file_error = "Error when opening file: %{file}"
 
 [pl0]
+invalid_file = "Invalid CL0 file. Does the file contain compiled PL0 bytecode?"
+
 procedure_count = "Procedure count"
 arch = "Architecture"
 invalid = "invalid"

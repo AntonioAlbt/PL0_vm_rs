@@ -37,7 +37,7 @@ fn main() {
         }
     });
 
-    if args.is_empty() || help {
+    if args.len() <= 1 || help {
         print!("{}", t!("help", version = VERSION));
         exit(0);
     }

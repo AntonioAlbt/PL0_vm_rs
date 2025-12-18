@@ -110,6 +110,11 @@ impl PL0VM {
     }
 
     pub fn print_analysis(&self) {
+        if self.program.len() <= 4 || self.program[3] > 0 {
+            error(&t!("pl0.invalid_file"));
+            return;
+        }
+
         let mut pc = 4;
         let mut procedure_count = self.read_arg(0);
         print!("0000: {}: {:04X} = {}, ", t!("pl0.procedure_count"), procedure_count, procedure_count);
@@ -239,6 +244,27 @@ impl PL0VM {
 
     //noinspection RsConstantConditionIf
     pub fn execute(&self) {
+        if self.program.len() <= 4 || self.program[3] > 0 {
+            error(&t!("pl0.invalid_file"));
+            return;
+        }
+
+        // --- architecture check ---
+        let arch_bytes = self.read_arg(ARG_SIZE);
+        if self.debug {
+            let invalid = t!("pl0.invalid");
+            println!("\t@0000: {:<21}{arch_bytes:04X} = {}", t!("pl0.set_arch"), match arch_bytes {
+                2 => "16 bit",
+                4 => "32 bit",
+                8 => "64 bit",
+                _ => &invalid,
+            });
+        }
+        if arch_bytes != 2 && arch_bytes != 4 && arch_bytes != 8 {
+            error(&t!("pl0.arch_invalid", arch = arch_bytes:{:04X}));
+            return;
+        }
+
         let (mut procedures, constants) = self.load_data();
 
         // --- execution state ---
@@ -275,22 +301,6 @@ impl PL0VM {
         };
         // calculate the address start + offset, with respect to types
         let offsetted = |start: &usize, offset: isize| start.checked_add_signed(offset).expect("invalid variable offset");
-
-        // --- architecture check ---
-        let arch_bytes = self.read_arg(ARG_SIZE);
-        if self.debug {
-            let invalid = t!("pl0.invalid");
-            println!("\t@0000: {:<21}{arch_bytes:04X} = {}", t!("pl0.set_arch"), match arch_bytes {
-                2 => "16 bit",
-                4 => "32 bit",
-                8 => "64 bit",
-                _ => &invalid,
-            });
-        }
-        if arch_bytes != 2 && arch_bytes != 4 && arch_bytes != 8 {
-            error(&t!("pl0.arch_invalid", arch = arch_bytes:{:04X}));
-            return;
-        }
 
         // --- main execution loop ---
         loop {
