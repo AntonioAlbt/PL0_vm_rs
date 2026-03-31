@@ -609,7 +609,10 @@ impl PL0VM {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
-                    let val = int % 2 == 1;
+                    // Done this way to handle negative numbers correctly
+                    // because -1 % 2 == -1 and 1 % 2 == 1
+                    let not_odd = int % 2 == 0;
+                    let val = !not_odd;
                     if self.debug { print!("{} => {}", int, val); }
                     push_data(&mut stack, self.data_bool(val));
                 }
