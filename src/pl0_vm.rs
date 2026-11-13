@@ -408,6 +408,9 @@ impl PL0VM {
                         break;
                     } else {
                         stack.truncate(procedures[cur_proc_i].frame_ptr);
+                        // restore the frame pointer of the previous activation of this procedure (needed for recursion)
+                        let old_frame_ptr = u64::from_le_bytes(stack.drain(stack.len() - 8..).collect::<Vec<u8>>().try_into().expect("jumping back failed - stack invalid"));
+                        procedures[cur_proc_i].frame_ptr = old_frame_ptr as usize;
                         let new_proc_i = u64::from_le_bytes(stack.drain(stack.len() - 8..).collect::<Vec<u8>>().try_into().expect("jumping back failed - stack invalid"));
                         let new_fp = u64::from_le_bytes(stack.drain(stack.len() - 8..).collect::<Vec<u8>>().try_into().expect("jumping back failed - stack invalid"));
                         let new_pc = u64::from_le_bytes(stack.drain(stack.len() - 8..).collect::<Vec<u8>>().try_into().expect("jumping back failed - stack invalid"));
@@ -430,6 +433,8 @@ impl PL0VM {
                     stack.extend((fp as u64).to_le_bytes());
                     stack.extend((cur_proc_i as u64).to_le_bytes());
                     let proc = &mut procedures[proc_id as usize];
+                    // save the callee's current frame pointer, so a recursive call does not lose the outer activation's frame
+                    stack.extend((proc.frame_ptr as u64).to_le_bytes());
                     if self.debug { print!("pc: {pc} => {}, fp: {fp} => {}, cpi: {cur_proc_i} => {}", proc.start_pos, stack.len(), proc_id); }
                     cur_proc_i = proc_id as usize;
                     pc = proc.start_pos;
