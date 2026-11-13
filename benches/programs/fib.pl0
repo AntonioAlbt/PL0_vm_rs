@@ -1,0 +1,16 @@
+var n, r;
+procedure fib;
+var a, b;
+begin
+  if n < 2 then r := n;
+  if n >= 2 then
+  begin
+    n := n - 1; call fib; a := r;
+    n := n - 1; call fib; b := r;
+    n := n + 2;
+    r := a + b
+  end
+end;
+begin
+  n := 25; call fib; ! r
+end.

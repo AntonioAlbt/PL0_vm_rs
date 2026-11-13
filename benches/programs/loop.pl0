@@ -1,0 +1,12 @@
+var i, s;
+begin
+  i := 0; s := 0;
+  while i < 300000 do
+  begin
+    s := s + i * 3 - i / 2;
+    if odd i then s := s - 1;
+    s := s - (s / 1000003) * 1000003;
+    i := i + 1
+  end;
+  ! s
+end.

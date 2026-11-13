@@ -1,0 +1,16 @@
+var i, s;
+procedure inc;
+var t;
+begin
+  t := i * 2;
+  s := s + t - (s / 7) * 7
+end;
+begin
+  i := 0; s := 0;
+  while i < 300000 do
+  begin
+    call inc;
+    i := i + 1
+  end;
+  ! s
+end.
