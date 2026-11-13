@@ -7,6 +7,7 @@ edition = "2021"
 num_enum = "0.7.5"
 rust-i18n = "3.1.5"
 sys-locale = "0.3.2"
+thiserror = "2.0.21"
 
 [dev-dependencies]
 criterion = "0.8.2"

@@ -1,7 +1,7 @@
 use crate::opcodes::OpCode;
-use crate::pl0_vm::Data::{B16, B32, B64};
 use std::fmt::Debug;
-use std::io::{stderr, stdin, BufRead, Write};
+use std::io::{BufRead, Write, stderr, stdin};
+use std::marker::PhantomData;
 use rust_i18n::t;
 
 fn error(msg: &str) {
@@ -20,79 +20,149 @@ struct Procedure {
     frame_ptr: usize,
 }
 
-// wrapper for differently sized integers
-#[derive(Debug, Clone)]
-enum Data {
-    B16(i16),
-    B32(i32),
-    B64(i64),
-}
-impl Data {
-    fn i64(&self) -> i64 {
-        self.clone().into()
-    }
-    fn to_bytes(&self) -> Vec<u8> {
-        match self {
-            B16(x) => x.to_le_bytes().to_vec(),
-            B32(x) => x.to_le_bytes().to_vec(),
-            B64(x) => x.to_le_bytes().to_vec(),
-        }
-    }
-}
-impl Into<i64> for Data {
-    fn into(self) -> i64 {
-        match self {
-            B16(num) => num as i64,
-            B32(num) => num as i64,
-            B64(num) => num,
-        }
-    }
+trait Word: Copy + Into<i64> + std::fmt::Display {
+    const SIZE: usize;
+    const TRUE: Self;
+    const FALSE: Self;
+
+    fn bool(val: bool) -> Self;
+
+    fn i64(self) -> i64;
+    fn from_bytes(data: &[u8]) -> Self;
+    fn try_from_bytes(data: Option<&[u8]>) -> Option<Self>;
+    fn from_i64(val: i64) -> Self;
+
+    fn push(self, stack: &mut Vec<u8>);
+    fn write(self, stack: &mut Vec<u8>, at: usize);
+    fn pop(stack: &mut Vec<u8>) -> Option<Self>;
+    fn invert(self) -> Self;
 }
 
-pub struct PL0VM {
+macro_rules! impl_word {
+    ($t:ty, $size:expr) => {
+        impl Word for $t {
+            const SIZE: usize = $size;
+            const TRUE: Self = 1;
+            const FALSE: Self = 0;
+
+            fn from_bytes(data: &[u8]) -> $t {
+                <$t>::from_le_bytes(data[0..$size].try_into().expect("Invalid byte count?!"))
+            }
+
+            fn try_from_bytes(data: Option<&[u8]>) -> Option<$t> {
+                match data {
+                    Some(d) => Some(Self::from_bytes(d)),
+                    None => None,
+                }
+            }
+
+            fn pop(stack: &mut Vec<u8>) -> Option<Self> {
+                let len = stack.len();
+
+                if len < Self::SIZE {
+                    return None;
+                }
+
+                let start = len - Self::SIZE;
+                
+                let data_bytes = &stack[start..(start + Self::SIZE)];
+                let data = Self::from_bytes(data_bytes);
+
+                stack.truncate(start);
+
+                Some(data)
+            }
+
+            fn bool(val: bool) -> Self {
+                if val {
+                    Self::TRUE
+                } else {
+                    Self::FALSE
+                }
+            }
+
+            fn from_i64(val: i64) -> Self {
+                val as $t
+            }
+
+
+
+            fn i64(self) -> i64 {
+                self as i64
+            }
+
+            fn push(self, stack: &mut Vec<u8>) {
+                stack.extend(self.to_le_bytes());
+            }
+
+            fn write(self, stack: &mut Vec<u8>, at: usize) {
+                if stack.len() < (at + Self::SIZE) { stack.resize(at + Self::SIZE, 0); }
+                stack[at..(at + Self::SIZE)].copy_from_slice(&self.to_le_bytes());
+            }
+
+            fn invert(self) -> Self {
+                -self
+            }
+        }
+    };
+}
+
+impl_word!(i16, 2);
+impl_word!(i32, 4);
+impl_word!(i64, 8);
+
+pub trait Vm {
+    fn execute(&self);
+    fn print_analysis(&self);
+}
+
+impl<W: Word, const DEBUG: bool> Vm for PL0VM<W, DEBUG> {
+    fn execute(&self) { PL0VM::execute(self) }
+    fn print_analysis(&self) { PL0VM::print_analysis(self) }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum LoadError {
+    #[error("could not read file: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("file is too short to contain a header")]
+    MissingHeader,
+    #[error("unsupported word size {0} (expected 2, 4 or 8)")]
+    UnsupportedWordSize(i16),
+}
+
+pub fn load_vm_from_file(filename: &str, debug: bool) -> Result<Box<dyn Vm>, LoadError> {
+    let bytes = std::fs::read(filename)?;          // `?` converts the io::Error via From
+    // turn the runtime bool into a const generic once, here:
+    if debug { from_bytes::<true>(bytes) } else { from_bytes::<false>(bytes) }
+}
+
+fn from_bytes<const DEBUG: bool>(bytes: Vec<u8>) -> Result<Box<dyn Vm>, LoadError> {
+    let word_size = match bytes.get(ARG_SIZE..ARG_SIZE*2) {
+        Some(&[lo, hi]) => i16::from_le_bytes([lo, hi]),   // slice pattern, no try_into/expect
+        _ => return Err(LoadError::MissingHeader),
+    };
+
+    // the type annotation lets each arm coerce to Box<dyn Vm>
+    let vm: Box<dyn Vm> = match word_size {
+        2 => Box::new(PL0VM::<i16, DEBUG>::new(bytes)),
+        4 => Box::new(PL0VM::<i32, DEBUG>::new(bytes)),
+        8 => Box::new(PL0VM::<i64, DEBUG>::new(bytes)),
+        n => return Err(LoadError::UnsupportedWordSize(n)),
+    };
+    Ok(vm)
+}
+
+struct PL0VM<W: Word, const DEBUG: bool> {
     program: Vec<u8>,
-    bits: Data,
-    debug: bool,
+    x: PhantomData<W>
 }
 
-impl PL0VM {
-    pub fn new(debug: bool) -> PL0VM {
-        PL0VM {
-            program: vec![],
-            bits: B16(0),
-            debug,
-        }
-    }
-    fn data_size(&self) -> usize { match self.bits { B16(_) => 2, B32(_) => 4, B64(_) => 8 } }
-
-    fn data_true(&self) -> Data { match self.bits { B16(_) => B16(1), B32(_) => B32(1), B64(_) => B64(1) } }
-    fn data_false(&self) -> Data { match self.bits { B16(_) => B16(0), B32(_) => B32(0), B64(_) => B64(0) } }
-    fn data_bool(&self, val: bool) -> Data { match val { true => self.data_true(), false => self.data_false() } }
-
-    pub fn from_file(debug: bool, filename: &str) -> Result<PL0VM, std::io::Error> {
-        let mut pl0vm = PL0VM::new(debug);
-        match pl0vm.load_from_file(filename) {
-            Ok(_) => Ok(pl0vm),
-            Err(e) => Err(e),
-        }
-    }
-
-    pub fn load_from_file(&mut self, filename: &str) -> Result<bool, std::io::Error> {
-        match std::fs::read(filename) {
-            Ok(bytes) => {
-                self.program = bytes;
-                self.bits = match self.read_arg(ARG_SIZE) {
-                    Some(val) => match val {
-                        2 => B16(0),
-                        4 => B32(0),
-                        8 => B64(0),
-                        _ => return Ok(false),
-                    },
-                    None => return Ok(false),
-                };
-                Ok(true)
-            },
-            Err(err) => { Err(err) },
+impl<Data: Word, const DEBUG: bool> PL0VM<Data, DEBUG> {
+    pub fn new(program: Vec<u8>) -> PL0VM<Data, DEBUG> {
+        PL0VM::<Data, DEBUG> {
+            program: program,
+            x: PhantomData,
         }
     }
 
@@ -102,18 +172,9 @@ impl PL0VM {
             None => None
         }
     }
-    fn bytes_to_data(&self, bytes: &Option<&[u8]>) -> Option<Data> {
-        match bytes {
-            Some(bytes) => Some(match self.bits {
-                B16(_) => B16(i16::from_le_bytes(bytes[0..2].try_into().expect("Invalid byte count?!"))),
-                B32(_) => B32(i32::from_le_bytes(bytes[0..4].try_into().expect("Invalid byte count?!"))),
-                B64(_) => B64(i64::from_le_bytes(bytes[0..8].try_into().expect("Invalid byte count?!"))),
-            }),
-            None => None,
-        }
-    }
+
     fn read_data(&self, offset: usize) -> Option<Data> {
-        self.bytes_to_data(&self.program.get(offset..))
+        Data::try_from_bytes(self.program.get(offset..))
     }
 
     pub fn print_analysis(&self) {
@@ -232,8 +293,8 @@ impl PL0VM {
 
             if rem_bytes <= 0 && procedure_count == 0 { break; }
         }
-        (0..((self.program.len() - pc) / self.data_size())).map(|i| self.read_data(pc + self.data_size() * i)).enumerate().for_each(|(i, constant)| {
-            let ds2 = self.data_size() * 2;
+        (0..((self.program.len() - pc) / Data::SIZE)).map(|i| self.read_data(pc + Data::SIZE * i)).enumerate().for_each(|(i, constant)| {
+            let ds2 = Data::SIZE * 2;
             let c = match constant {
                 Some(val) => val,
                 None => return error(&t!("pl0.error.invalid_constant_read", i = i)),
@@ -284,7 +345,7 @@ impl PL0VM {
         }
         Some((
             procedures.into_iter().map(|procedure| procedure.unwrap()).collect(),
-            (0..((self.program.len() - pc) / self.data_size())).map(|i| self.read_data(pc + self.data_size() * i).expect(&t!("pl0.error.invalid_constant_read", i = i))).collect(),
+            (0..((self.program.len() - pc) / Data::SIZE)).map(|i| self.read_data(pc + Data::SIZE * i).expect(&t!("pl0.error.invalid_constant_read", i = i))).collect(),
         ))
     }
 
@@ -300,7 +361,7 @@ impl PL0VM {
             Some(val) => val,
             None => return error(&t!("pl0.error.failed_arch_read")),
         };
-        if self.debug {
+        if DEBUG {
             let invalid = t!("pl0.invalid");
             println!("\t@0000: {:<21}{arch_bytes:04X} = {}", t!("pl0.set_arch"), match arch_bytes {
                 2 => "16 bit",
@@ -323,47 +384,17 @@ impl PL0VM {
         // program counter = index of currently executed byte
         let mut pc = procedures[0].start_pos;
         // stack = contains all dynamic runtime data
-        let mut stack: Vec<u8> = vec![];
+        let mut stack: Vec<u8> = Vec::with_capacity(4096); // reserve 4 KB at startup
         // frame pointer = index of start of current stack frame in vector stack
         let mut fp = 0usize;
         // current procedure index = index of current procedure in vector procedures
         let mut cur_proc_i = 0usize;
 
         // --- collection of functions used for execution ---
-        // pop one Data from the stack
-        let pop_data = |stack: &mut Vec<u8>| -> Option<Data> {
-            let size = self.data_size();
-            let len = stack.len();
-
-            if len < size {
-                return None;
-            }
-
-            let start = len - size;
-            
-            let data_bytes = &stack[start..];
-            let data = self.bytes_to_data(&Some(data_bytes));
-
-            stack.truncate(start);
-
-            data
-        };
-        // push a Data onto the stack
-        let push_data = |stack: &mut Vec<u8>, data: Data| {
-            stack.append(&mut data.to_bytes());
-        };
         // pop one argument from the bytecode, by increasing the program counter by ARG_SIZE
         let pop_argument = |pc: &mut usize| -> Option<i16> {
             *pc += ARG_SIZE;
             self.read_arg(*pc - ARG_SIZE)
-        };
-        // set the bytes at the specified position (fp) in the stack to the value in data
-        let set_addr = |stack: &mut Vec<u8>, fp: &usize, data: &Data| {
-            if stack.len() < (fp + self.data_size()) { stack.resize(fp + self.data_size(), 0); }
-            let bytes = match data {
-                B16(v) => v.to_le_bytes().to_vec(), B32(v) => v.to_le_bytes().to_vec(), B64(v) => v.to_le_bytes().to_vec(),
-            };
-            stack.splice(fp..&(fp + self.data_size()), bytes);
         };
         // calculate the address start + offset, with respect to types
         let offsetted = |start: &usize, offset: isize| start.checked_add_signed(offset).expect("invalid variable offset");
@@ -380,7 +411,7 @@ impl PL0VM {
                     break;
                 },
             };
-            if self.debug { print!("\t@{pc:04X}: {:<21}", op); }
+            if DEBUG { print!("\t@{pc:04X}: {:<21}", op); }
             // increase program counter already, so that next pop_argument call returns valid data
             pc += 1;
             match op {
@@ -400,11 +431,11 @@ impl PL0VM {
                     } as usize;
                     fp = procedures[proc_i as usize].frame_ptr;
                     stack.resize(fp + varlen, 0);
-                    if self.debug { print!("{}", t!("pl0.reserved_varspace", bytes = varlen)); }
+                    if DEBUG { print!("{}", t!("pl0.reserved_varspace", bytes = varlen)); }
                 }
                 OpCode::ReturnProc => {
                     if cur_proc_i == 0 {
-                        if self.debug { println!("{}", t!("pl0.exiting")); }
+                        if DEBUG { println!("{}", t!("pl0.exiting")); }
                         break;
                     } else {
                         stack.truncate(procedures[cur_proc_i].frame_ptr);
@@ -414,7 +445,7 @@ impl PL0VM {
                         let new_proc_i = u64::from_le_bytes(stack.drain(stack.len() - 8..).collect::<Vec<u8>>().try_into().expect("jumping back failed - stack invalid"));
                         let new_fp = u64::from_le_bytes(stack.drain(stack.len() - 8..).collect::<Vec<u8>>().try_into().expect("jumping back failed - stack invalid"));
                         let new_pc = u64::from_le_bytes(stack.drain(stack.len() - 8..).collect::<Vec<u8>>().try_into().expect("jumping back failed - stack invalid"));
-                        if self.debug { print!("pc: {pc} => {new_pc}, fp: {fp} => {new_fp}, cpi: {cur_proc_i} => {new_proc_i}"); }
+                        if DEBUG { print!("pc: {pc} => {new_pc}, fp: {fp} => {new_fp}, cpi: {cur_proc_i} => {new_proc_i}"); }
                         pc = new_pc as usize;
                         fp = new_fp as usize;
                         cur_proc_i = new_proc_i as usize;
@@ -435,7 +466,7 @@ impl PL0VM {
                     let proc = &mut procedures[proc_id as usize];
                     // save the callee's current frame pointer, so a recursive call does not lose the outer activation's frame
                     stack.extend((proc.frame_ptr as u64).to_le_bytes());
-                    if self.debug { print!("pc: {pc} => {}, fp: {fp} => {}, cpi: {cur_proc_i} => {}", proc.start_pos, stack.len(), proc_id); }
+                    if DEBUG { print!("pc: {pc} => {}, fp: {fp} => {}, cpi: {cur_proc_i} => {}", proc.start_pos, stack.len(), proc_id); }
                     cur_proc_i = proc_id as usize;
                     pc = proc.start_pos;
                     proc.frame_ptr = stack.len();
@@ -450,12 +481,12 @@ impl PL0VM {
                         error(&t!("pl0.invalid_local_var_val", addr = addr));
                         return;
                     }
-                    let data = match self.bytes_to_data(&stack.get(offsetted(&fp, addr as isize)..)) {
+                    let data = match Data::try_from_bytes(stack.get(offsetted(&fp, addr as isize)..)) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     };
-                    if self.debug { print!("{}", t!("pl0.took_from_addr", val = data.i64(), addr = offsetted(&fp, addr as isize))); }
-                    push_data(&mut stack, data);
+                    if DEBUG { print!("{}", t!("pl0.took_from_addr", val = data.i64(), addr = offsetted(&fp, addr as isize))); }
+                    data.push(&mut stack);
                 }
                 OpCode::PushValueMainVar => {
                     let addr = match pop_argument(&mut pc) {
@@ -466,12 +497,12 @@ impl PL0VM {
                         error(&t!("pl0.invalid_main_var_val", addr = addr));
                         return;
                     }
-                    let data = match self.bytes_to_data(&stack.get(offsetted(&procedures[0].frame_ptr, addr as isize)..)) {
+                    let data = match Data::try_from_bytes(stack.get(offsetted(&procedures[0].frame_ptr, addr as isize)..)) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     };
-                    if self.debug { print!("{}", t!("pl0.took_from_addr", val = data.i64(), addr = offsetted(&procedures[0].frame_ptr, addr as isize))); }
-                    push_data(&mut stack, data);
+                    if DEBUG { print!("{}", t!("pl0.took_from_addr", val = data.i64(), addr = offsetted(&procedures[0].frame_ptr, addr as isize))); }
+                    data.push(&mut stack);
                 }
                 OpCode::PushValueGlobalVar => {
                     let addr = match pop_argument(&mut pc) {
@@ -486,12 +517,12 @@ impl PL0VM {
                         error(&t!("pl0.invalid_global_var_val", addr = addr, proc_index = proc_index));
                         return;
                     }
-                    let data = match self.bytes_to_data(&stack.get(offsetted(&procedures[proc_index].frame_ptr, addr as isize)..)) {
+                    let data = match Data::try_from_bytes(stack.get(offsetted(&procedures[proc_index].frame_ptr, addr as isize)..)) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     };
-                    if self.debug { print!("{}", t!("pl0.took_from_addr", val = data.i64(), addr = offsetted(&procedures[proc_index].frame_ptr, addr as isize))); }
-                    push_data(&mut stack, data);
+                    if DEBUG { print!("{}", t!("pl0.took_from_addr", val = data.i64(), addr = offsetted(&procedures[proc_index].frame_ptr, addr as isize))); }
+                    data.push(&mut stack);
                 }
                 OpCode::PushAddressLocalVar => {
                     let addr = match pop_argument(&mut pc) {
@@ -502,9 +533,9 @@ impl PL0VM {
                         error(&t!("pl0.invalid_local_var_addr", addr = addr));
                         return;
                     }
-                    let data = self.bytes_to_data(&Some(&offsetted(&fp, addr as isize).to_le_bytes())).expect("failed to convert offset to Data");
-                    if self.debug { print!("{}", t!("pl0.pushed_addr", addr = offsetted(&fp, addr as isize))); }
-                    push_data(&mut stack, data);
+                    let data = Data::try_from_bytes(Some(&offsetted(&fp, addr as isize).to_le_bytes())).expect("failed to convert offset to Data");
+                    if DEBUG { print!("{}", t!("pl0.pushed_addr", addr = offsetted(&fp, addr as isize))); }
+                    data.push(&mut stack);
                 }
                 OpCode::PushAddressMainVar => {
                     let addr = match pop_argument(&mut pc) {
@@ -515,9 +546,9 @@ impl PL0VM {
                         error(&t!("pl0.invalid_main_var_addr", addr = addr));
                         return;
                     }
-                    let data = self.bytes_to_data(&Some(&offsetted(&procedures[0].frame_ptr, addr as isize).to_le_bytes())).expect("failed to convert offset to Data");
-                    if self.debug { print!("{}", t!("pl0.pushed_addr", addr = offsetted(&procedures[0].frame_ptr, addr as isize))); }
-                    push_data(&mut stack, data);
+                    let data = Data::try_from_bytes(Some(&offsetted(&procedures[0].frame_ptr, addr as isize).to_le_bytes())).expect("failed to convert offset to Data");
+                    if DEBUG { print!("{}", t!("pl0.pushed_addr", addr = offsetted(&procedures[0].frame_ptr, addr as isize))); }
+                    data.push(&mut stack);
                 }
                 OpCode::PushAddressGlobalVar => {
                     let addr = match pop_argument(&mut pc) {
@@ -532,11 +563,11 @@ impl PL0VM {
                         error(&t!("pl0.invalid_global_var_addr", addr = addr, proc_index = proc_index));
                         return;
                     }
-                    if self.debug {
+                    if DEBUG {
                         print!("{}", t!("pl0.pushed_global_addr", proc_index = proc_index, addr = addr, push_addr = offsetted(&procedures[proc_index].frame_ptr, addr as isize)));
                     }
-                    let data = self.bytes_to_data(&Some(&offsetted(&procedures[proc_index].frame_ptr, addr as isize).to_le_bytes())).expect("failed to convert offset to Data");
-                    push_data(&mut stack, data);
+                    let data = Data::try_from_bytes(Some(&offsetted(&procedures[proc_index].frame_ptr, addr as isize).to_le_bytes())).expect("failed to convert offset to Data");
+                    data.push(&mut stack);
                 }
                 OpCode::PushConstant => {
                     let c = match pop_argument(&mut pc) {
@@ -548,39 +579,39 @@ impl PL0VM {
                         return;
                     }
                     let cd = constants[c as usize].clone();
-                    if self.debug { print!("{}", t!("pl0.pushed_constant", c = c, val = cd.i64())); }
-                    push_data(&mut stack, cd);
+                    if DEBUG { print!("{}", t!("pl0.pushed_constant", c = c, val = cd.i64())); }
+                    cd.push(&mut stack);
                 }
                 OpCode::StoreValue => {
-                    let data = match pop_data(&mut stack) {
+                    let data = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     };
-                    let addr = match pop_data(&mut stack) {
+                    let addr = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
-                    if self.debug { print!("{}", t!("pl0.stored_value", val = data.i64(), addr = addr)) }
-                    set_addr(&mut stack, &(addr as usize), &data);
+                    if DEBUG { print!("{}", t!("pl0.stored_value", val = data.i64(), addr = addr)) }
+                    data.write(&mut stack, addr as usize);
                 }
 
                 OpCode::OutputValue => {
-                    let data = match pop_data(&mut stack) {
+                    let data = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     };
-                    if self.debug {
+                    if DEBUG {
                         print!("{}\n{}", data.i64(), data.i64());
                     } else {
                         println!("{}", data.i64());
                     }
                 }
                 OpCode::InputToAddr => {
-                    let addr = match pop_data(&mut stack) {
+                    let addr = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     };
-                    if self.debug { println!("{}", t!("pl0.to_address", addr = addr.i64())); }
+                    if DEBUG { println!("{}", t!("pl0.to_address", addr = addr.i64())); }
                     // wait for user to input a valid number
                     'input_loop: loop {
                         let mut line = String::new();
@@ -588,7 +619,7 @@ impl PL0VM {
                         let input: Result<i64, _> = line.trim().parse();
                         match input {
                             Ok(num) => {
-                                set_addr(&mut stack, &offsetted(&fp, addr.i64() as isize), &self.bytes_to_data(&Some(&num.to_le_bytes())).expect("failed to convert number to Data - unreachable error"));
+                                Data::from_bytes(&num.to_le_bytes()).write(&mut stack, offsetted(&fp, addr.i64() as isize));
                                 break 'input_loop;
                             },
                             Err(_) => {
@@ -599,18 +630,16 @@ impl PL0VM {
                 }
 
                 OpCode::Minusify => {
-                    let int = match pop_data(&mut stack) {
+                    let int = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     };
-                    let data = match int {
-                        B16(x) => B16(-x), B32(x) => B32(-x), B64(x) => B64(-x),
-                    };
-                    if self.debug { print!("{} => {}", int.i64(), data.i64()); }
-                    push_data(&mut stack, data);
+                    let data = int.invert();
+                    if DEBUG { print!("{} => {}", int.i64(), data.i64()); }
+                    data.push(&mut stack);
                 }
                 OpCode::IsOdd => {
-                    let int = match pop_data(&mut stack) {
+                    let int = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
@@ -618,148 +647,140 @@ impl PL0VM {
                     // because -1 % 2 == -1 and 1 % 2 == 1
                     let not_odd = int % 2 == 0;
                     let val = !not_odd;
-                    if self.debug { print!("{} => {}", int, val); }
-                    push_data(&mut stack, self.data_bool(val));
+                    if DEBUG { print!("{} => {}", int, val); }
+                    Data::bool(val).push(&mut stack);
                 }
 
                 OpCode::OpAdd => {
-                    let right = match pop_data(&mut stack) {
+                    let right = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
-                    let left = match pop_data(&mut stack) {
+                    let left = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
                     let val = left + right;
-                    if self.debug { print!("{left} + {right} = {val}") }
-                    push_data(&mut stack, match self.bits {
-                        B16(_) => B16(val as i16), B32(_) => B32(val as i32), B64(_) => B64(val),
-                    });
+                    if DEBUG { print!("{left} + {right} = {val}") }
+                    Data::from_i64(val).push(&mut stack);
                 }
                 OpCode::OpSubtract => {
-                    let right = match pop_data(&mut stack) {
+                    let right = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
-                    let left = match pop_data(&mut stack) {
+                    let left = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
                     let val = left - right;
-                    if self.debug { print!("{left} - {right} = {val}") }
-                    push_data(&mut stack, match self.bits {
-                        B16(_) => B16(val as i16), B32(_) => B32(val as i32), B64(_) => B64(val),
-                    });
+                    if DEBUG { print!("{left} - {right} = {val}") }
+                    Data::from_i64(val).push(&mut stack);
                 }
                 OpCode::OpMultiply => {
-                    let right = match pop_data(&mut stack) {
+                    let right = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
-                    let left = match pop_data(&mut stack) {
+                    let left = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
                     let val = left * right;
-                    if self.debug { print!("{left} * {right} = {val}") }
-                    push_data(&mut stack, match self.bits {
-                        B16(_) => B16(val as i16), B32(_) => B32(val as i32), B64(_) => B64(val),
-                    });
+                    if DEBUG { print!("{left} * {right} = {val}") }
+                    Data::from_i64(val).push(&mut stack);
                 }
                 OpCode::OpDivide => {
-                    let right = match pop_data(&mut stack) {
+                    let right = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
-                    let left = match pop_data(&mut stack) {
+                    let left = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
                     let val = left / right;
-                    if self.debug { print!("{left} / {right} = {val}") }
-                    push_data(&mut stack, match self.bits {
-                        B16(_) => B16(val as i16), B32(_) => B32(val as i32), B64(_) => B64(val),
-                    });
+                    if DEBUG { print!("{left} / {right} = {val}") }
+                    Data::from_i64(val).push(&mut stack);
                 }
 
                 OpCode::CompareEq => {
-                    let right = match pop_data(&mut stack) {
+                    let right = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
-                    let left = match pop_data(&mut stack) {
+                    let left = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
                     let val = left == right;
-                    if self.debug { print!("{left} == {right} = {val}") }
-                    push_data(&mut stack, self.data_bool(val));
+                    if DEBUG { print!("{left} == {right} = {val}") }
+                    Data::bool(val).push(&mut stack);
                 }
                 OpCode::CompareNotEq => {
-                    let right = match pop_data(&mut stack) {
+                    let right = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
-                    let left = match pop_data(&mut stack) {
+                    let left = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
                     let val = left != right;
-                    if self.debug { print!("{left} != {right} = {val}") }
-                    push_data(&mut stack, self.data_bool(val));
+                    if DEBUG { print!("{left} != {right} = {val}") }
+                    Data::bool(val).push(&mut stack);
                 }
                 OpCode::CompareLT => {
-                    let right = match pop_data(&mut stack) {
+                    let right = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
-                    let left = match pop_data(&mut stack) {
+                    let left = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
                     let val = left < right;
-                    if self.debug { print!("{left} < {right} = {val}") }
-                    push_data(&mut stack, self.data_bool(val));
+                    if DEBUG { print!("{left} < {right} = {val}") }
+                    Data::bool(val).push(&mut stack);
                 }
                 OpCode::CompareGT => {
-                    let right = match pop_data(&mut stack) {
+                    let right = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
-                    let left = match pop_data(&mut stack) {
+                    let left = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
                     let val = left > right;
-                    if self.debug { print!("{left} > {right} = {val}") }
-                    push_data(&mut stack, self.data_bool(val));
+                    if DEBUG { print!("{left} > {right} = {val}") }
+                    Data::bool(val).push(&mut stack);
                 }
                 OpCode::CompareLTEq => {
-                    let right = match pop_data(&mut stack) {
+                    let right = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
-                    let left = match pop_data(&mut stack) {
+                    let left = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
                     let val = left <= right;
-                    if self.debug { print!("{left} <= {right} = {val}") }
-                    push_data(&mut stack, self.data_bool(val));
+                    if DEBUG { print!("{left} <= {right} = {val}") }
+                    Data::bool(val).push(&mut stack);
                 }
                 OpCode::CompareGTEq => {
-                    let right = match pop_data(&mut stack) {
+                    let right = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
-                    let left = match pop_data(&mut stack) {
+                    let left = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
                     let val = left >= right;
-                    if self.debug { print!("{left} >= {right} = {val}") }
-                    push_data(&mut stack, self.data_bool(val));
+                    if DEBUG { print!("{left} >= {right} = {val}") }
+                    Data::bool(val).push(&mut stack);
                 }
 
                 OpCode::Jump => {
@@ -768,10 +789,10 @@ impl PL0VM {
                         None => return error(&t!("pl0.error.invalid_arg_read", addr = pc:{:04X})),
                     };
                     pc = offsetted(&pc, offset as isize);
-                    if self.debug { print!("{}", t!("pl0.jumping_to", pc = pc:{:04X})); }
+                    if DEBUG { print!("{}", t!("pl0.jumping_to", pc = pc:{:04X})); }
                 }
                 OpCode::JumpIfFalse => {
-                    let dat = match pop_data(&mut stack) {
+                    let dat = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
@@ -779,10 +800,10 @@ impl PL0VM {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_arg_read", addr = pc:{:04X})),
                     };
-                    if self.debug { print!("{}", t!("pl0.jumping_if_bool", bool = dat == 0)); }
+                    if DEBUG { print!("{}", t!("pl0.jumping_if_bool", bool = dat == 0)); }
                     if dat == 0 {
                         pc = offsetted(&pc, offset as isize);
-                        if self.debug { print!("{}", t!("pl0.jumping_if_where", pc = pc:{:04X})); }
+                        if DEBUG { print!("{}", t!("pl0.jumping_if_where", pc = pc:{:04X})); }
                     }
                 }
 
@@ -796,7 +817,7 @@ impl PL0VM {
                             break;
                         }
                     };
-                    if self.debug {
+                    if DEBUG {
                         print!("\"{str}\"\n{str}");
                     } else {
                         println!("{str}");
@@ -804,30 +825,30 @@ impl PL0VM {
                 }
 
                 OpCode::Pop => {
-                    if self.debug {
-                        println!("{}", t!("pl0.popped", data = match pop_data(&mut stack) {
+                    if DEBUG {
+                        println!("{}", t!("pl0.popped", data = match Data::pop(&mut stack) {
                             Some(val) => val,
                             None => return error(&t!("pl0.error.invalid_stack_read")),
                         }.i64()));
                     } else {
-                        pop_data(&mut stack);
+                        Data::pop(&mut stack);
                     }
                 }
                 OpCode::Swap => {
-                    let offset = match pop_data(&mut stack) {
+                    let offset = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
-                    let data = match self.bytes_to_data(&stack.get((offset as usize)..)) {
+                    let data = match Data::try_from_bytes(stack.get((offset as usize)..)) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     };
-                    if self.debug { print!("{}", t!("pl0.swapped", addr = offset as usize, val = data.i64())) }
-                    push_data(&mut stack, data);
+                    if DEBUG { print!("{}", t!("pl0.swapped", addr = offset as usize, val = data.i64())) }
+                    data.push(&mut stack);
                 }
 
                 OpCode::EndOfCode => {
-                    if self.debug { println!(); }
+                    if DEBUG { println!(); }
                     break;
                 }
 
@@ -843,17 +864,17 @@ impl PL0VM {
                 4. Write Value to stack at AbsoluteAddress
                 */
                 OpCode::Put => {
-                    let data = match pop_data(&mut stack) {
+                    let data = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     };
-                    let addr = match pop_data(&mut stack) {
+                    let addr = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
                     let abs_addr = offsetted(&fp, addr as isize);
-                    if self.debug { print!("addr (rel) = {addr}, abs_addr = {abs_addr}, value = {:?}", data.i64()); }
-                    set_addr(&mut stack, &abs_addr, &data);
+                    if DEBUG { print!("addr (rel) = {addr}, abs_addr = {abs_addr}, value = {:?}", data.i64()); }
+                    data.write(&mut stack, abs_addr);
                 }
 
                 /*
@@ -868,16 +889,16 @@ impl PL0VM {
                 3. push value onto the stack
                 */
                 OpCode::Get => {
-                    let addr = match pop_data(&mut stack) {
+                    let addr = match Data::pop(&mut stack) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     }.i64();
-                    let data = match self.bytes_to_data(&stack.get((addr as usize)..)) {
+                    let data = match Data::try_from_bytes(stack.get((addr as usize)..)) {
                         Some(val) => val,
                         None => return error(&t!("pl0.error.invalid_stack_read")),
                     };
-                    if self.debug { print!("addr = {addr}, value = {:?}", data.i64()); }
-                    push_data(&mut stack, data);
+                    if DEBUG { print!("addr = {addr}, value = {:?}", data.i64()); }
+                    data.push(&mut stack);
                 }
 
                 OpCode::OpAddAddr => { todo!() }
@@ -885,7 +906,7 @@ impl PL0VM {
 
             match op {
                 OpCode::InputToAddr => (),
-                _ => if self.debug { println!(); }
+                _ => if DEBUG { println!(); }
             };
         }
     }

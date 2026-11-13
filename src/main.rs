@@ -1,6 +1,6 @@
 use std::env;
 use std::process::exit;
-use crate::pl0_vm::PL0VM;
+use crate::pl0_vm::{load_vm_from_file};
 use rust_i18n::t;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -14,7 +14,7 @@ fn main() {
     let mut analyze_only = false;
     let mut debug = false;
     let mut help = false;
-    let mut filename: Option<&str> = None;
+    let mut filename_arg: Option<&str> = None;
     let args: Vec<String> = env::args().collect();
 
     let locale = sys_locale::get_locale().unwrap_or_else(|| "en".to_string());
@@ -33,7 +33,7 @@ fn main() {
         } else if arg == "--lang=en" {
             rust_i18n::set_locale("en");
         } else {
-            filename = Some(arg);
+            filename_arg = Some(arg);
         }
     });
 
@@ -42,15 +42,15 @@ fn main() {
         exit(0);
     }
 
-    if filename.is_none() {
+    let Some(filename) = filename_arg else {
         println!("{}", t!("no_filename"));
         return;
-    }
+    };
 
-    let pl0vm = match PL0VM::from_file(debug, filename.unwrap()) {
+    let pl0vm = match load_vm_from_file(filename, debug) {
         Ok(pl0vm) => pl0vm,
-        Err(_) => {
-            println!("{}", t!("file_error", file = filename.unwrap()));
+        Err(err) => {
+            println!("{} - {}", t!("file_error", file = filename), err);
             return
         }
     };
