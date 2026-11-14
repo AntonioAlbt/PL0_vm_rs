@@ -459,7 +459,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pl0_vm_rs"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "criterion",
  "num_enum",
