@@ -27,14 +27,14 @@ trait Word: Copy + Into<i64> + std::fmt::Display {
 
     fn bool(val: bool) -> Self;
 
-    fn i64(self) -> i64;
     fn from_bytes(data: &[u8]) -> Self;
     fn try_from_bytes(data: Option<&[u8]>) -> Option<Self>;
     fn from_i64(val: i64) -> Self;
+    fn pop(stack: &mut Vec<u8>) -> Option<Self>;
 
+    fn i64(self) -> i64;
     fn push(self, stack: &mut Vec<u8>);
     fn write(self, stack: &mut Vec<u8>, at: usize);
-    fn pop(stack: &mut Vec<u8>) -> Option<Self>;
     fn invert(self) -> Self;
 }
 
@@ -51,7 +51,7 @@ macro_rules! impl_word {
 
             fn try_from_bytes(data: Option<&[u8]>) -> Option<$t> {
                 match data {
-                    Some(d) => Some(Self::from_bytes(d)),
+                    Some(d) => Some(<$t>::from_le_bytes(d[0..$size].try_into().ok()?)),
                     None => None,
                 }
             }
@@ -88,7 +88,7 @@ macro_rules! impl_word {
 
 
             fn i64(self) -> i64 {
-                self as i64
+                self.into()
             }
 
             fn push(self, stack: &mut Vec<u8>) {
@@ -440,14 +440,20 @@ impl<Data: Word, const DEBUG: bool> PL0VM<Data, DEBUG> {
                     } else {
                         stack.truncate(procedures[cur_proc_i].frame_ptr);
                         // restore the frame pointer of the previous activation of this procedure (needed for recursion)
-                        let old_frame_ptr = u64::from_le_bytes(stack.drain(stack.len() - 8..).collect::<Vec<u8>>().try_into().expect("jumping back failed - stack invalid"));
-                        procedures[cur_proc_i].frame_ptr = old_frame_ptr as usize;
-                        let new_proc_i = u64::from_le_bytes(stack.drain(stack.len() - 8..).collect::<Vec<u8>>().try_into().expect("jumping back failed - stack invalid"));
-                        let new_fp = u64::from_le_bytes(stack.drain(stack.len() - 8..).collect::<Vec<u8>>().try_into().expect("jumping back failed - stack invalid"));
-                        let new_pc = u64::from_le_bytes(stack.drain(stack.len() - 8..).collect::<Vec<u8>>().try_into().expect("jumping back failed - stack invalid"));
-                        if DEBUG { print!("pc: {pc} => {new_pc}, fp: {fp} => {new_fp}, cpi: {cur_proc_i} => {new_proc_i}"); }
+                        let base = procedures[cur_proc_i].frame_ptr;
+                        let rd = |i: usize| u64::from_le_bytes(stack[i..i + 8].try_into().expect("jumping back failed - stack invalid")) as usize;
+                        let old_frame_ptr = rd(base - 8);
+                        let new_proc_i    = rd(base - 16);
+                        let new_fp        = rd(base - 24);
+                        let new_pc        = rd(base - 32);
+                        stack.truncate(base - 32);
+                        if DEBUG {
+                            let pre_fp = procedures[cur_proc_i].frame_ptr;
+                            print!("pc: {pc} => {new_pc}, fp: {fp} => {new_fp}, cpi: {cur_proc_i} => {new_proc_i}, old fp: {pre_fp} => {old_frame_ptr}");
+                        }
                         pc = new_pc as usize;
                         fp = new_fp as usize;
+                        procedures[cur_proc_i].frame_ptr = old_frame_ptr as usize;
                         cur_proc_i = new_proc_i as usize;
                     }
                 }
